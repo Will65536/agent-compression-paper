@@ -1,0 +1,292 @@
+\documentclass{article}
+
+% if you need to pass options to natbib, use, e.g.:
+%     \PassOptionsToPackage{numbers, compress}{natbib}
+% before loading neurips_2026
+
+% The authors should use one of these tracks.
+% Before accepting by the NeurIPS conference, select one of the options below.
+% 0. "default" for submission
+\usepackage{neurips_2026}
+% the "default" option is equal to the "main" option, which is used for the Main Track with double-blind reviewing.
+% 1. "main" option is used for the Main Track
+%  \usepackage[main]{neurips_2026}
+% 2. "position" option is used for the Position Paper Track
+%  \usepackage[position]{neurips_2026}
+% 3. "eandd" option is used for the Evaluations & Datasets Track
+ % \usepackage[eandd]{neurips_2026}
+ % if you need to opt-in for a single-blind submission in the E&D track:
+ %\usepackage[eandd, nonanonymous]{neurips_2026}
+% 4. "creativeai" option is used for the Creative AI Track
+%  \usepackage[creativeai]{neurips_2026}
+% 5. "sglblindworkshop" option is used for the Workshop with single-blind reviewing
+ % \usepackage[sglblindworkshop]{neurips_2026}
+% 6. "dblblindworkshop" option is used for the Workshop with double-blind reviewing
+%  \usepackage[dblblindworkshop]{neurips_2026}
+
+% After being accepted, the authors should add "final" behind the track to compile a camera-ready version.
+% 1. Main Track
+ % \usepackage[main, final]{neurips_2026}
+% 2. Position Paper Track
+%  \usepackage[position, final]{neurips_2026}
+% 3. Evaluations & Datasets Track
+ % \usepackage[eandd, final]{neurips_2026}
+% 4. Creative AI Track
+%  \usepackage[creativeai, final]{neurips_2026}
+% 5. Workshop with single-blind reviewing
+%  \usepackage[sglblindworkshop, final]{neurips_2026}
+% 6. Workshop with double-blind reviewing
+%  \usepackage[dblblindworkshop, final]{neurips_2026}
+
+% "preprint" option is used for arXiv or other preprint submissions
+ % \usepackage[preprint]{neurips_2026}
+
+% to avoid loading the natbib package, add option nonatbib:
+%    \usepackage[nonatbib]{neurips_2026}
+
+\usepackage[utf8]{inputenc} % allow utf-8 input
+\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
+\usepackage{hyperref}       % hyperlinks
+\usepackage{url}            % simple URL typesetting
+\usepackage{booktabs}       % professional-quality tables
+\usepackage{amsfonts}       % blackboard math symbols
+\usepackage{amsmath}        % \text{} in math mode, align, etc.
+\usepackage{nicefrac}       % compact symbols for 1/2, etc.
+\usepackage{microtype}      % microtypography
+\usepackage{xcolor}         % colors
+
+\title{Cheaper Steps, Costlier Tasks: From Trajectory Expansion to a Compression Framework for LLM Agents}
+
+
+\author{%
+  David S.~Hippocampus\thanks{Use footnote for providing further information
+    about author (webpage, alternative address)---\emph{not} for acknowledging
+    funding agencies.} \\
+  Department of Computer Science\\
+  Cranberry-Lemon University\\
+  Pittsburgh, PA 15213 \\
+  \texttt{hippo@cs.cranberry-lemon.edu} \\
+  % \And
+  % Coauthor \\
+  % Affiliation \\
+  % Address \\
+  % \texttt{email} \\
+}
+
+
+\begin{document}
+
+
+\maketitle
+
+
+\begin{abstract}
+Recent advances in LLM compression have substantially improved inference efficiency, often measured through local metrics such as per-token latency, static memory footprint, and standalone model quality. However, these metrics do not fully capture agent execution, where model outputs recursively shape future inputs, tool interactions, and stopping decisions. We argue that compression in LLM agents is not merely a local systems optimization, but a closed-loop intervention on decision dynamics. We identify trajectory expansion as a central effect of compression: although compressed agents execute each step more cheaply, they often follow longer or less efficient reasoning-and-action trajectories to complete the same task. We quantify this effect through step inflation, the increase in interaction steps relative to an uncompressed agent. Trajectory expansion breaks the link between local efficiency and end-to-end utility. It can induce latency reversal, where a compressed agent becomes slower overall despite lower per-step cost, and memory rebound, where longer trajectories accumulate larger histories and KV-cache states, weakening or even negating effective runtime memory savings. We further show that the interaction between weight compression and KV-cache compression is non-additive and becomes more pronounced in long-horizon settings. Overall, our results expose a fundamental closed-loop mismatch between local compression gains and global agent utility, suggesting that compression for LLM agents should be evaluated---and ultimately designed---at the trajectory level rather than solely at the token level.
+\end{abstract}
+
+
+\section{Introduction}
+
+Large language model (LLM) compression has become a central tool for improving inference efficiency. By reducing weight precision, shrinking runtime state, or otherwise lowering the cost of individual decoding steps, compression can substantially reduce deployment cost. In much of the literature---especially for model compression and a large portion of KV-cache compression---these gains are primarily assessed through local efficiency metrics such as per-token latency, memory footprint, and standalone downstream quality. Implicit in this evaluation paradigm is a simple assumption: improving local inference efficiency will translate into improved end-to-end system performance.
+
+This assumption becomes fragile in agent settings. Unlike single-pass generation, an LLM agent operates in a closed loop: each model output shapes future inputs by determining what to reason about next, whether to invoke a tool, how to react to observations, and when to terminate. In this setting, compression is not merely a systems optimization applied to an isolated forward pass. It is also an intervention on the agent's decision process. Small perturbations to the model's action distribution can accumulate across interaction rounds, altering how the task is decomposed, explored, and completed.
+
+This closed-loop view reveals a mismatch between local efficiency and global utility. A compressed agent may execute each step more cheaply, yet still take a longer or less efficient path to solve the same problem. It may revisit previously explored subgoals, make redundant tool calls, delay termination, or enter recovery loops after small local mistakes. The result is not only a change in final task success, but a structural change in the trajectory through which the task is attempted. We refer to this phenomenon as \textbf{trajectory expansion}: compression-induced changes in agent behavior that lead to longer or less efficient reasoning-and-action trajectories. As an observable proxy, we measure \textbf{step inflation}, defined as the increase in interaction steps taken by a compressed agent relative to its uncompressed counterpart.
+
+Trajectory expansion has direct systems consequences. First, it can create a \textbf{latency reversal} regime: although compression reduces per-step model cost, the total end-to-end latency may improve much less than expected, remain unchanged, or even increase once expanded trajectories are taken into account. Second, it can induce a \textbf{memory rebound} effect. In agent execution, memory usage is not purely static; it depends on the trajectory itself. Longer trajectories accumulate longer histories, more intermediate context, and larger KV-cache states over time, potentially offsetting or even negating the memory savings promised by compression at the model level. From this perspective, memory efficiency in agents is trajectory-dependent rather than solely determined by compressed parameter storage.
+
+Recent work on agent-oriented context compression has begun to evaluate end-to-end outcomes in long-horizon settings. However, these methods typically focus on reducing context growth while preserving task success, rather than analyzing compression itself as a trajectory-shaping intervention. More broadly, existing evaluations---whether centered on token-level efficiency or final task outcome---still leave underexplored a key question: how compression changes the induced trajectory distribution of a closed-loop agent, and how those trajectory shifts mediate the relationship between local efficiency and global utility.
+
+In this paper, we study LLM compression through this closed-loop lens. Our goal is not merely to show that compression can hurt agents, nor simply to benchmark compressed models on agent tasks. Instead, we seek to identify the mechanism by which local efficiency gains can fail to translate into end-to-end utility improvements. We center this analysis on trajectory expansion and examine how it emerges across models, tasks, and compression methods, as well as how it interacts with latency and memory in long-horizon execution. By doing so, we argue that compression for LLM agents should be evaluated not only by the cost of each step, but by how it reshapes the trajectory as a whole.
+
+Our contributions are threefold. First, we introduce a closed-loop perspective on LLM compression in agent systems, highlighting a fundamental mismatch between local step efficiency and end-to-end utility. Second, we identify trajectory expansion as a central behavioral mechanism and operationalize it through trajectory-level measurements such as step inflation and related structural indicators. Third, we show that this mechanism gives rise to practically important regimes, including latency reversal and memory rebound, which are invisible to standard local efficiency metrics. Together, our findings suggest that compression for LLM agents must be analyzed---and ultimately designed---at the trajectory level rather than solely at the token level.
+
+
+\section{Background and Problem Setup}
+
+\subsection{Background: Compression Beyond Local Inference Efficiency}
+
+Compression has become a standard tool for improving the efficiency of large language model (LLM) inference. Existing approaches span multiple levels of the inference stack, including \emph{weight-level compression} (e.g., quantization and pruning), \emph{KV-cache compression} for reducing runtime memory, and more recent forms of \emph{context-oriented compression} designed to control history growth in long-horizon execution. Despite their differences, these methods are largely motivated by the same objective: reducing inference cost while preserving model quality.
+
+A large portion of this literature evaluates compression through \emph{local efficiency metrics}, such as per-token latency, static memory footprint, throughput, and standalone downstream quality. This paradigm is natural for conventional single-pass inference, where generation can often be treated as an open-loop process under fixed inputs. Under this view, improvements in local efficiency are implicitly expected to translate into end-to-end gains.
+
+This assumption becomes less reliable in \emph{agentic} LLM systems. An LLM agent does not produce a single output from a fixed prompt; it interacts with an environment over multiple rounds of reasoning, action, and observation. Each output shapes future inputs: the agent may call a tool, revise its plan, revisit a subgoal, or terminate execution. As a result, the total cost of solving a task depends not only on the cost of each step, but also on how the execution trajectory unfolds.
+
+Compression in agents is therefore not purely a local systems optimization. In addition to reducing per-step computation, it can perturb the model's decision dynamics and thereby alter the trajectory taken to solve a task. This creates a mismatch between \emph{local efficiency gains} and \emph{global utility gains} that standard open-loop evaluation does not fully expose.
+
+\subsection{Open-Loop and Closed-Loop Compression}
+
+To make this mismatch precise, we distinguish between \emph{open-loop} and \emph{closed-loop} execution.
+
+In an \emph{open-loop} setting, model outputs do not recursively alter the future evaluation context. Efficiency is therefore governed primarily by local properties such as decoding speed, memory use, and prediction quality under fixed inputs. Compression can then be analyzed mainly in terms of its effect on the cost and fidelity of individual forward passes.
+
+In a \emph{closed-loop} setting, by contrast, the model is embedded in an interactive decision process: its outputs influence future states, which in turn influence future outputs. This feedback loop is fundamental to agent execution, where the model must repeatedly decide what to do next, whether to continue, and how to respond to new observations. Compression therefore acts through two coupled channels:
+
+\begin{enumerate}
+    \item \textbf{Local cost reduction}, by lowering the computational or memory cost of each step; and
+    \item \textbf{Policy perturbation}, by changing the model's action distribution and thus the trajectory induced during execution.
+\end{enumerate}
+
+Our central premise is that these two effects must be analyzed jointly. A compressed agent may be cheaper per step yet less efficient overall if compression reshapes the trajectory in ways that increase the number, structure, or cost of future interactions.
+
+\subsection{Agent Trajectories}
+
+We model agent execution as a trajectory
+\[
+\tau = (s_0, a_0, o_1, s_1, a_1, o_2, \dots, a_{T-1}, o_T),
+\]
+where $s_t$ denotes the agent state or context at step $t$, $a_t$ the model-produced action, and $o_{t+1}$ the resulting observation from the environment or tool execution. The trajectory length $T$ is the total number of interaction steps before termination.
+
+Here, an action may correspond to internal reasoning, a tool invocation, a plan update, or a final answer. The exact implementation may vary across agent frameworks; the key property is that each output changes the context for subsequent steps.
+
+Let $M$ denote an uncompressed model and $C(M)$ its compressed counterpart. Standard compression analysis focuses on how $C(M)$ changes local inference cost, such as latency or memory per step. In agent settings, however, compression also changes the distribution over trajectories induced by the model. Compression therefore affects not only \emph{how expensive each step is}, but also \emph{which steps are taken} and \emph{how many steps are required} to complete a task.
+
+This trajectory-level view is the basis of our analysis.
+
+\subsection{Trajectory Expansion and Step Inflation}
+
+We use \emph{trajectory expansion} to describe the central closed-loop effect studied in this work. Informally, trajectory expansion occurs when compression causes an agent to follow a longer or less efficient reasoning-and-action path for the same task.
+
+Trajectory expansion is broader than simply taking more steps. It may appear as revisiting previously explored subgoals, issuing redundant tool calls, delaying termination, entering recovery loops after local mistakes, or taking less direct action sequences before reaching the same outcome. Because such structural changes are not always visible from final task success alone, we operationalize trajectory expansion through a measurable proxy: \emph{step inflation}. For a paired task instance executed under an uncompressed model and a compressed model, step inflation is the increase in interaction steps required by the compressed agent. Step inflation does not capture every form of trajectory inefficiency, but it provides an interpretable and directly observable signal of trajectory-level distortion.
+
+This distinction is important: \emph{step inflation is a metric; trajectory expansion is the underlying behavioral phenomenon}.
+
+\subsection{From Local Efficiency to End-to-End Cost}
+
+The importance of trajectory expansion lies in its impact on end-to-end system cost. Let the total latency of a trajectory be
+\[
+L(\tau) = \sum_{t=0}^{T-1} \left( L_t^{\text{model}} + L_t^{\text{tool}} + L_t^{\text{overhead}} \right),
+\]
+where $L_t^{\text{model}}$ is the model inference cost at step $t$, $L_t^{\text{tool}}$ the cost of any tool interaction, and $L_t^{\text{overhead}}$ orchestration or framework overhead.
+
+Compression often reduces $L_t^{\text{model}}$, but it may also increase $T$, alter the pattern of tool use, or shift the balance between model and non-model costs. Lower per-step cost therefore does not guarantee lower end-to-end latency. We refer to the regime in which compressed agents become no faster---or even slower---overall as \emph{latency reversal}.
+
+A parallel issue arises for memory. Compression is often discussed in terms of reduced static model footprint or reduced runtime state per token. In agent execution, however, effective memory usage is also \emph{trajectory-dependent}. Longer trajectories accumulate more context, more intermediate outputs, and potentially larger KV-cache states over time. Thus, even when compression reduces local memory cost, expanded trajectories can shrink or erase the expected runtime benefit. We refer to this effect as \emph{memory rebound}.
+
+Both consequences reflect the same principle: in closed-loop agent execution, the global utility of compression depends on how compression reshapes the trajectory, not only on how it reduces local step cost.
+
+\subsection{Scope of This Work}
+
+This paper focuses on compression in \emph{LLM agent systems}, where tasks are solved through multi-step interaction rather than single-pass generation. Our goal is neither to propose another compression algorithm nor to treat agent evaluation as a pure benchmarking exercise. Instead, we study compression as a \emph{closed-loop intervention} whose impact must be understood at the trajectory level.
+
+Concretely, we ask:
+
+\begin{itemize}
+    \item When does compression induce trajectory expansion?
+    \item When do local gains fail to translate into end-to-end latency or memory improvements?
+    \item How do these effects vary across task horizon, agent behavior, and compression type?
+    \item How can these observations support a more trajectory-aware framework for using compression in agent systems?
+\end{itemize}
+
+By formulating the problem in this way, we shift compression analysis for LLM agents from token-level efficiency to trajectory-level utility.
+
+
+\section{Trajectory-Level Analysis of Compression in Agents}
+
+We analyze compression in LLM agents from a trajectory-level perspective. In open-loop settings, compression is typically evaluated through local metrics such as per-token latency, memory footprint, or standalone model quality. Agent execution, however, is closed-loop: each model output affects future context, tool interaction, and stopping behavior. Consequently, compression changes not only the local cost of a step, but also the distribution of trajectories induced on the same task. We therefore treat compression not merely as a local efficiency intervention, but as a trajectory-shaping perturbation whose end-to-end effects emerge through the interaction between step-level cost and trajectory-level behavior.
+
+\subsection{Agent Execution as a Trajectory Distribution}
+
+We model an agent's execution on a task instance $x$ as a trajectory
+\[
+\tau = (s_0, a_0, o_1, s_1, a_1, o_2, \dots, a_{T-1}, o_T),
+\]
+where $s_t$ denotes the agent state or context at step $t$, $a_t$ denotes the action taken at that step, $o_{t+1}$ denotes the resulting observation from the environment or a tool, and $T$ is the trajectory length. Actions may include internal reasoning, tool invocation, or final answer emission. The state $s_t$ is recursively formed from the task input together with prior actions and observations.
+
+Let $\pi$ denote the policy induced by an uncompressed model and $\pi_c$ the policy induced by its compressed counterpart. Execution on the same task instance then induces trajectory distributions
+\[
+\tau \sim p_{\pi}(\tau \mid x), \qquad \tau_c \sim p_{\pi_c}(\tau \mid x).
+\]
+This formulation highlights the central distinction between agent compression and fixed-input evaluation. Compression does not merely change the cost of executing a fixed computation. It can also shift the policy itself, thereby changing which reasoning-and-action paths the agent follows on the same task. In other words, compression affects both how expensive each step is and which steps are taken at all.
+
+This distinction is minor in single-pass evaluation, where compressed and uncompressed models are often compared on the same input under nearly fixed execution structure. In a closed-loop agent, by contrast, even small perturbations to intermediate decisions can recursively affect later context, future tool choices, and eventual stopping. The natural object of analysis is therefore the induced trajectory distribution rather than an isolated output sequence.
+
+\subsection{Local Efficiency and Trajectory-Level Utility}
+
+The trajectory view clarifies why local compression gains do not directly determine end-to-end outcomes. Let the latency of a trajectory $\tau$ be
+\[
+L(\tau) = \sum_{t=0}^{T-1}\bigl(L_t^{\mathrm{model}} + L_t^{\mathrm{tool}} + L_t^{\mathrm{overhead}}\bigr),
+\]
+where $L_t^{\mathrm{model}}$ is the model computation time at step $t$, $L_t^{\mathrm{tool}}$ is the external tool or environment latency, and $L_t^{\mathrm{overhead}}$ captures orchestration overheads. The expected end-to-end latency on task instance $x$ is then
+\[
+\mathcal{L}(\pi; x) = \mathbb{E}_{\tau \sim p_{\pi}(\tau \mid x)}[L(\tau)],
+\]
+and for the compressed agent,
+\[
+\mathcal{L}(\pi_c; x) = \mathbb{E}_{\tau \sim p_{\pi_c}(\tau \mid x)}[L_c(\tau)].
+\]
+For a fixed trajectory, compression may reduce $L_t^{\mathrm{model}}$ and thus lower per-step cost. But the compressed policy may also shift probability mass toward trajectories that are longer or less efficient. End-to-end latency therefore depends jointly on step cost and induced trajectory structure.
+
+The same logic applies to task utility. Let $U(\tau)$ denote a task-level utility such as success, correctness, or reward. The expected utility of the agent on task $x$ is
+\[
+\mathcal{U}(\pi; x) = \mathbb{E}_{\tau \sim p_{\pi}(\tau \mid x)}[U(\tau)].
+\]
+Compression can change this quantity not only by degrading local prediction quality, but also by altering trajectory dynamics---for example, through delayed termination, repeated recovery loops, or less direct action sequences. Local efficiency gains therefore do not imply end-to-end utility gains unless the induced trajectory remains sufficiently stable.
+
+\subsection{Trajectory Expansion as the Central Mechanism}
+
+We use the term \emph{trajectory expansion} to describe the tendency of compression to induce longer or less efficient reasoning-and-action paths for the same task instance. This is the central mechanism in our analysis. Importantly, trajectory expansion is broader than merely taking more steps. A compressed agent may exhibit repeated tool calls, delayed stopping, additional recovery attempts, revisiting of intermediate subgoals, or less direct paths to the same solution even when raw step count changes are modest.
+
+To formalize this idea, let $\phi(\tau)$ denote a trajectory inefficiency functional. In general, $\phi(\tau)$ may combine multiple dimensions of inefficiency, including trajectory length, tool usage, repeated actions, stopping delay, and context growth. A generic instantiation is
+\[
+\phi(\tau)
+=
+\alpha_1 T
++ \alpha_2 N_{\mathrm{tool}}
++ \alpha_3 R_{\mathrm{repeat}}
++ \alpha_4 D_{\mathrm{stop}}
++ \alpha_5 C_{\mathrm{ctx}},
+\]
+where $T$ is the number of steps, $N_{\mathrm{tool}}$ is the number of tool calls, $R_{\mathrm{repeat}}$ measures repeated or redundant actions, $D_{\mathrm{stop}}$ captures delayed termination, and $C_{\mathrm{ctx}}$ measures accumulated context growth. We define trajectory expansion induced by compression on task instance $x$ as
+\[
+\Delta_{\mathrm{traj}}(x)
+=
+\mathbb{E}_{\tau \sim p_{\pi_c}(\tau \mid x)}[\phi(\tau)]
+-
+\mathbb{E}_{\tau \sim p_{\pi}(\tau \mid x)}[\phi(\tau)].
+\]
+A positive value indicates that compression increases expected trajectory inefficiency under the chosen operationalization.
+
+This definition also clarifies the role of step inflation. Step inflation is a useful observable signal, but it is not the mechanism itself. It captures one manifestation of trajectory expansion, namely an increase in the number of agent steps. Compression may also reshape trajectories through more indirect plans, repeated tool use, delayed stopping, or faster context accumulation even when raw step count changes are limited. We therefore treat step inflation as a proxy for a broader trajectory-level phenomenon rather than as the primary conceptual object.
+
+From this perspective, the key question is not simply whether compression makes individual steps cheaper, but whether it preserves trajectory efficiency. Some compressed agents retain favorable end-to-end trade-offs because local gains dominate. Others do not, because trajectory expansion offsets or overwhelms those gains.
+
+\subsection{From Trajectory Expansion to Latency Reversal and Memory Rebound}
+
+Trajectory expansion provides a direct explanation for why local efficiency gains may fail to produce end-to-end improvements. Consider latency first. Compression often reduces per-step model cost, so for a fixed step one may observe
+\[
+\Delta L_{\mathrm{local}} < 0.
+\]
+But this does not imply
+\[
+\Delta \mathcal{L}_{\mathrm{E2E}} < 0.
+\]
+If the compressed agent induces longer or less efficient trajectories, reductions in per-step model latency can be offset---or even overcompensated---by additional steps, extra tool invocations, longer contexts, or delayed stopping. We refer to this mismatch as \emph{latency reversal}: the end-to-end latency benefit suggested by local metrics becomes weak, disappears, or reverses under closed-loop execution.
+
+A similar phenomenon arises for memory. In agent settings, memory usage is not determined solely by the static footprint of model weights. It also depends on runtime execution and on how context evolves along the trajectory. We therefore distinguish three components:
+\[
+M(\tau) = M^{\mathrm{static}} + M^{\mathrm{runtime}}(\tau) + M^{\mathrm{history}}(\tau),
+\]
+where $M^{\mathrm{static}}$ is the persistent model footprint, $M^{\mathrm{runtime}}(\tau)$ captures step-wise runtime allocations, and $M^{\mathrm{history}}(\tau)$ captures trajectory-dependent growth such as accumulated context and KV-cache lifetime. Weight compression may reduce $M^{\mathrm{static}}$, but if compression also induces longer trajectories or faster context accumulation, the expected runtime memory savings can be weakened or erased. We refer to this effect as \emph{memory rebound}.
+
+Taken together, latency reversal and memory rebound show that compression in agents must be evaluated at the trajectory level rather than inferred from local metrics alone. The relevant object is not merely the compressed model as a faster or smaller component, but the compressed agent as a closed-loop system whose behavior emerges over trajectories. This perspective motivates the empirical analysis in the next section, where we study when compression induces trajectory expansion, how that expansion mediates end-to-end cost and utility, and which task regimes are most sensitive to these effects.
+
+
+\section{Experiments}
+
+
+\section{A Trajectory-Aware Compression Framework for LLM Agents}
+
+
+\section{Related Work}
+
+
+\section{Limitations and Conclusion}
+
+
+\begin{ack}
+\end{ack}
+
+\section*{References}
+
+\end{document}
